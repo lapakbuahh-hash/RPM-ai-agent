@@ -1,6 +1,8 @@
 import json
 import os
+import time
 from google import genai
+from google.genai.errors import ServerError
 import requests
 
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
@@ -35,15 +37,29 @@ def send_telegram(text: str) -> None:
 
 def classify_lead(channel: str, message: str) -> dict:
     prompt = f"Channel: {channel}\nPesan: {message}"
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt,
-        config={"system_instruction": SYSTEM_INSTRUCTION},
-    )
-    raw = response.text.strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`").replace("json", "", 1).strip()
-    return json.loads(raw)
+    models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash"]
+
+    last_error = None
+    for model_name in models_to_try:
+        for attempt in range(1, 4):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={"system_instruction": SYSTEM_INSTRUCTION},
+                )
+                raw = response.text.strip()
+                if raw.startswith("```"):
+                    raw = raw.strip("`").replace("json", "", 1).strip()
+                return json.loads(raw)
+            except ServerError as e:
+                last_error = e
+                if e.code == 503 and attempt < 3:
+                    time.sleep(2 * attempt)
+                    continue
+                break
+
+    raise last_error
 
 
 if __name__ == "__main__":
