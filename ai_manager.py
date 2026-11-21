@@ -52,7 +52,7 @@ def classify_lead(channel: str, message: str) -> dict:
   prompt = f"Channel: {channel}\nPesan: {message}"
 
   last_error = None
-  for attempt in range(1, 6):
+  for attempt in range(1, 3):
     try:
       response = client.models.generate_content(
           model="gemini-3.8-flash",
@@ -65,8 +65,10 @@ def classify_lead(channel: str, message: str) -> dict:
       return json.loads(raw)
     except APIError as e:
       last_error = e
-      if e.code in (429, 500, 503) and attempt < 5:
-        time.sleep(3 * attempt)
+      if e.code == 429:
+        raise
+      if e.code in (500, 503) and attempt < 2:
+        time.sleep(2)
         continue
       raise
 
@@ -77,6 +79,19 @@ def get_spreadsheet():
   creds_dict = json.loads(GCP_SERVICE_ACCOUNT_JSON)
   gc = gspread.service_account_from_dict(creds_dict)
   return gc.open_by_key(GSHEET_ID)
+
+
+def _find_next_empty_row_col_a(ws, start_row: int = 2) -> int:
+  col_a_values = ws.col_values(1)
+  for row_idx in range(start_row, len(col_a_values) + 1):
+    val = (
+        col_a_values[row_idx - 1].strip()
+        if row_idx - 1 < len(col_a_values)
+        else ""
+    )
+    if not val:
+      return row_idx
+  return max(start_row, len(col_a_values) + 1)
 
 
 def save_to_sheets(channel: str, result: dict) -> str:
@@ -105,6 +120,7 @@ def save_to_sheets(channel: str, result: dict) -> str:
         result.get("prioritas", "Sedang"),
         "Baru",
     ]
+    end_col = "I"
   else:
     row = [
         now_str,
@@ -115,9 +131,15 @@ def save_to_sheets(channel: str, result: dict) -> str:
         result.get("ringkasan", "-"),
         "Baru",
     ]
+    end_col = "G"
 
-  ws_target.append_row(row, value_input_option="USER_ENTERED")
-  print(f"Appended to {target_tab}:", row)
+  next_row = _find_next_empty_row_col_a(ws_target, start_row=2)
+  ws_target.update(
+      f"A{next_row}:{end_col}{next_row}",
+      [row],
+      value_input_option="USER_ENTERED",
+  )
+  print(f"Wrote to {target_tab} row {next_row}:", row)
 
   ws_log = sh.worksheet("Daily_Log")
   log_records = ws_log.get_all_values()
@@ -132,15 +154,21 @@ def save_to_sheets(channel: str, result: dict) -> str:
   updated_existing = False
   for idx in range(1, len(log_records)):
     row_vals = log_records[idx]
-    if row_vals and row_vals[0].startswith(today_only):
+    if row_vals and row_vals[0].strip().startswith(today_only):
       total_prev = (
-          int(row_vals[1]) if len(row_vals) > 1 and row_vals[1].isdigit() else 0
+          int(row_vals[1])
+          if len(row_vals) > 1 and row_vals[1].strip().isdigit()
+          else 0
       )
       maklon_prev = (
-          int(row_vals[2]) if len(row_vals) > 2 and row_vals[2].isdigit() else 0
+          int(row_vals[2])
+          if len(row_vals) > 2 and row_vals[2].strip().isdigit()
+          else 0
       )
       trial_prev = (
-          int(row_vals[3]) if len(row_vals) > 3 and row_vals[3].isdigit() else 0
+          int(row_vals[3])
+          if len(row_vals) > 3 and row_vals[3].strip().isdigit()
+          else 0
       )
       prev_highlight = row_vals[4] if len(row_vals) > 4 and row_vals[4] else ""
       prev_gap = row_vals[5] if len(row_vals) > 5 and row_vals[5] else "-"
@@ -164,13 +192,16 @@ def save_to_sheets(channel: str, result: dict) -> str:
               new_highlight,
               new_gap,
           ]],
+          value_input_option="USER_ENTERED",
       )
       updated_existing = True
       break
 
   if not updated_existing:
-    ws_log.append_row(
-        [today_only, 1, maklon_inc, trial_inc, highlight, gap_sop],
+    next_log_row = _find_next_empty_row_col_a(ws_log, start_row=2)
+    ws_log.update(
+        f"A{next_log_row}:F{next_log_row}",
+        [[today_only, 1, maklon_inc, trial_inc, highlight, gap_sop]],
         value_input_option="USER_ENTERED",
     )
 
