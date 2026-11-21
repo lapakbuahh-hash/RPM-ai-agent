@@ -1,9 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import json
 import os
-import time
 from google import genai
-from google.genai.errors import APIError
 import gspread
 import requests
 
@@ -50,29 +48,15 @@ def send_telegram(text: str) -> None:
 
 def classify_lead(channel: str, message: str) -> dict:
   prompt = f"Channel: {channel}\nPesan: {message}"
-
-  last_error = None
-  for attempt in range(1, 3):
-    try:
-      response = client.models.generate_content(
-          model="gemini-3.8-flash",
-          contents=prompt,
-          config={"system_instruction": SYSTEM_INSTRUCTION},
-      )
-      raw = response.text.strip()
-      if raw.startswith("```"):
-        raw = raw.strip("`").replace("json", "", 1).strip()
-      return json.loads(raw)
-    except APIError as e:
-      last_error = e
-      if e.code == 429:
-        raise
-      if e.code in (500, 503) and attempt < 2:
-        time.sleep(2)
-        continue
-      raise
-
-  raise last_error
+  response = client.models.generate_content(
+      model="gemini-3.8-flash",
+      contents=prompt,
+      config={"system_instruction": SYSTEM_INSTRUCTION},
+  )
+  raw = response.text.strip()
+  if raw.startswith("```"):
+    raw = raw.strip("`").replace("json", "", 1).strip()
+  return json.loads(raw)
 
 
 def get_spreadsheet():
