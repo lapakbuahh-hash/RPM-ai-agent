@@ -48,6 +48,37 @@ def send_telegram(text: str) -> None:
   resp.raise_for_status()
 
 
+def classify_lead(channel: str, message: str) -> dict:
+  prompt = f"Channel: {channel}\nPesan: {message}"
+
+  last_error = None
+  for attempt in range(1, 6):
+    try:
+      response = client.models.generate_content(
+          model="gemini-3.8-flash",
+          contents=prompt,
+          config={"system_instruction": SYSTEM_INSTRUCTION},
+      )
+      raw = response.text.strip()
+      if raw.startswith("```"):
+        raw = raw.strip("`").replace("json", "", 1).strip()
+      return json.loads(raw)
+    except APIError as e:
+      last_error = e
+      if e.code in (429, 500, 503) and attempt < 5:
+        time.sleep(3 * attempt)
+        continue
+      raise
+
+  raise last_error
+
+
+def get_spreadsheet():
+  creds_dict = json.loads(GCP_SERVICE_ACCOUNT_JSON)
+  gc = gspread.service_account_from_dict(creds_dict)
+  return gc.open_by_key(GSHEET_ID)
+
+
 def save_to_sheets(channel: str, result: dict) -> str:
   sh = get_spreadsheet()
   print("Spreadsheet title:", sh.title)
