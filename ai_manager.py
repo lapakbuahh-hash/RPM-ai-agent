@@ -36,7 +36,7 @@ def send_telegram(text: str) -> None:
 def classify_lead(channel: str, message: str) -> dict:
     prompt = f"Channel: {channel}\nPesan: {message}"
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         contents=prompt,
         config={"system_instruction": SYSTEM_INSTRUCTION},
     )
