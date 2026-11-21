@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from google import genai
+from google.genai.errors import APIError
 import gspread
 import requests
 
@@ -12,6 +13,12 @@ GSHEET_ID = os.environ["GSHEET_ID"].strip()
 GCP_SERVICE_ACCOUNT_JSON = os.environ["GCP_SERVICE_ACCOUNT_JSON"].strip()
 
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+MODEL_CANDIDATES = [
+    "gemini-3.8-flash",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+]
 
 SYSTEM_INSTRUCTION = """
 Kamu adalah asisten AI operasional untuk PT Renjani Pijar Mustika (jasa maklon skincare khusus haji & umroh dengan MOQ mulai 100 pcs, serta produk ritel trial Kiswah Veil yang berisi facial wash 60ml, sunscreen spray 60ml, moisturizer 10gr, dan lip balm 10gr).
@@ -48,15 +55,28 @@ def send_telegram(text: str) -> None:
 
 def classify_lead(channel: str, message: str) -> dict:
   prompt = f"Channel: {channel}\nPesan: {message}"
-  response = client.models.generate_content(
-      model="gemini-3.8-flash",
-      contents=prompt,
-      config={"system_instruction": SYSTEM_INSTRUCTION},
-  )
-  raw = response.text.strip()
-  if raw.startswith("```"):
-    raw = raw.strip("`").replace("json", "", 1).strip()
-  return json.loads(raw)
+  last_error = None
+
+  for model_name in MODEL_CANDIDATES:
+    try:
+      print("Trying model:", model_name)
+      response = client.models.generate_content(
+          model=model_name,
+          contents=prompt,
+          config={"system_instruction": SYSTEM_INSTRUCTION},
+      )
+      raw = response.text.strip()
+      if raw.startswith("```"):
+        raw = raw.strip("`").replace("json", "", 1).strip()
+      return json.loads(raw)
+    except APIError as e:
+      last_error = e
+      print(f"Model {model_name} failed with {e.code}: {e.message}")
+      if e.code in (429, 500, 503, 404):
+        continue
+      raise
+
+  raise last_error
 
 
 def get_spreadsheet():
