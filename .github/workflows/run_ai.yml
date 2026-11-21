@@ -28,13 +28,15 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install google-genai requests
+        run: pip install google-genai requests gspread google-auth
 
       - name: Run AI Manager
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GSHEET_ID: ${{ secrets.GSHEET_ID }}
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
           LEAD_CHANNEL: ${{ github.event.inputs.channel || 'WhatsApp' }}
           LEAD_MESSAGE: ${{ github.event.inputs.message || 'Rekap harian operasional PT Renjani Pijar Mustika.' }}
         run: python ai_manager.py
