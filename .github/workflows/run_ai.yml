@@ -1,0 +1,40 @@
+name: Renjani AI Lead & Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Sumber pesan (Website / IG_DM / IG_Comment / WhatsApp)"
+        required: true
+        default: "WhatsApp"
+      message:
+        description: "Isi pesan prospek yang ingin diuji"
+        required: true
+        default: "Halo, saya mau tanya paket trial Kiswah Veil dulu sebelum ambil maklon."
+  schedule:
+    # Berjalan otomatis setiap hari pukul 12:00 UTC = 19:00 WIB
+    - cron: "0 12 * * *"
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-genai requests
+
+      - name: Run AI Manager
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LEAD_CHANNEL: ${{ github.event.inputs.channel || 'WhatsApp' }}
+          LEAD_MESSAGE: ${{ github.event.inputs.message || 'Rekap harian operasional PT Renjani Pijar Mustika.' }}
+        run: python ai_manager.py
