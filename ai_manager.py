@@ -44,42 +44,15 @@ def send_telegram(text: str) -> None:
   url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
   payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
   resp = requests.post(url, json=payload, timeout=20)
+  print("Telegram status:", resp.status_code, resp.text)
   resp.raise_for_status()
-
-
-def classify_lead(channel: str, message: str) -> dict:
-  prompt = f"Channel: {channel}\nPesan: {message}"
-
-  last_error = None
-  for attempt in range(1, 6):
-    try:
-      response = client.models.generate_content(
-          model="gemini-3.8-flash",
-          contents=prompt,
-          config={"system_instruction": SYSTEM_INSTRUCTION},
-      )
-      raw = response.text.strip()
-      if raw.startswith("```"):
-        raw = raw.strip("`").replace("json", "", 1).strip()
-      return json.loads(raw)
-    except APIError as e:
-      last_error = e
-      if e.code in (429, 500, 503) and attempt < 5:
-        time.sleep(3 * attempt)
-        continue
-      raise
-
-  raise last_error
-
-
-def get_spreadsheet():
-  creds_dict = json.loads(GCP_SERVICE_ACCOUNT_JSON)
-  gc = gspread.service_account_from_dict(creds_dict)
-  return gc.open_by_key(GSHEET_ID)
 
 
 def save_to_sheets(channel: str, result: dict) -> str:
   sh = get_spreadsheet()
+  print("Spreadsheet title:", sh.title)
+  print("Available worksheets:", [ws.title for ws in sh.worksheets()])
+
   now_str = get_wib_date()
   today_only = now_str.split(" ")[0]
   jalur = result.get("jalur", "Perlu_Klarifikasi")
@@ -90,7 +63,6 @@ def save_to_sheets(channel: str, result: dict) -> str:
   ws_target = sh.worksheet(target_tab)
 
   if target_tab == "Leads_Maklon":
-    # Kolom A-I: Tanggal | Channel | Nama | Kontak | Instansi_Travel_Brand | Minat_Produk | Estimasi_Qty | Prioritas | Status
     row = [
         now_str,
         channel,
@@ -103,7 +75,6 @@ def save_to_sheets(channel: str, result: dict) -> str:
         "Baru",
     ]
   else:
-    # Kolom A-G: Tanggal | Channel | Nama | Kontak | Detail_Paket_Trial | Catatan | Status
     row = [
         now_str,
         channel,
@@ -115,8 +86,8 @@ def save_to_sheets(channel: str, result: dict) -> str:
     ]
 
   ws_target.append_row(row, value_input_option="USER_ENTERED")
+  print(f"Appended to {target_tab}:", row)
 
-  # Update Daily_Log (Kolom A-F: Tanggal | Total_Masuk | Jumlah_Maklon | Jumlah_Trial | Highlight_Prioritas | Gap_SOP)
   ws_log = sh.worksheet("Daily_Log")
   log_records = ws_log.get_all_values()
 
@@ -187,6 +158,7 @@ if __name__ == "__main__":
   ).strip()
 
   result = classify_lead(sample_channel, sample_message)
+  print("AI Result:", json.dumps(result, ensure_ascii=False))
   saved_tab = save_to_sheets(sample_channel, result)
 
   notif = (
@@ -199,4 +171,3 @@ if __name__ == "__main__":
       f"Eskalasi ke Anda: {'YA' if result['perlu_eskalasi_manusia'] else 'TIDAK'}"
   )
   send_telegram(notif)
-  print(json.dumps(result, indent=2, ensure_ascii=False))
