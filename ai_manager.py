@@ -4,7 +4,6 @@ import os
 import time
 from google import genai
 from google.genai.errors import ServerError
-from google.oauth2.service_account import Credentials
 import gspread
 import requests
 
@@ -77,12 +76,7 @@ def classify_lead(channel: str, message: str) -> dict:
 
 def get_spreadsheet():
   creds_dict = json.loads(GCP_SERVICE_ACCOUNT_JSON)
-  scopes = [
-      "[https://www.googleapis.com/auth/spreadsheets](https://www.googleapis.com/auth/spreadsheets)",
-      "[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)",
-  ]
-  creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-  gc = gspread.authorize(creds)
+  gc = gspread.service_account_from_dict(creds_dict)
   return gc.open_by_key(GSHEET_ID)
 
 
