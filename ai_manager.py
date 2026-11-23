@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 from google import genai
 from google.genai.errors import APIError
 import gspread
@@ -17,7 +18,11 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_CANDIDATES = [
     "gemini-3.8-flash",
     "gemini-2.5-flash",
+    "gemini-2.0-flash",
 ]
+
+ALLOWED_JALUR = {"Maklon_Travel", "Trial_Kiswah_Veil", "Perlu_Klarifikasi"}
+ALLOWED_PRIORITAS = {"Tinggi", "Sedang", "Rendah"}
 
 SYSTEM_INSTRUCTION = """
 Kamu adalah asisten AI operasional untuk PT Renjani Pijar Mustika (jasa maklon skincare khusus haji & umroh dengan MOQ mulai 100 pcs, serta produk ritel trial Kiswah Veil yang berisi facial wash 60ml, sunscreen spray 60ml, moisturizer 10gr, dan lip balm 10gr).
@@ -44,12 +49,88 @@ def get_wib_date() -> str:
   return datetime.now(wib).strftime("%Y-%m-%d %H:%M")
 
 
-def send_telegram(text: str) -> None:
+def send_telegram(text: str, raise_on_error: bool = True) -> None:
   url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-  payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-  resp = requests.post(url, json=payload, timeout=20)
-  print("Telegram status:", resp.status_code, resp.text)
-  resp.raise_for_status()
+  payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000]}
+  try:
+    resp = requests.post(url, json=payload, timeout=20)
+    print("Telegram status:", resp.status_code, resp.text)
+    if raise_on_error:
+      resp.raise_for_status()
+  except Exception as e:
+    print("Telegram send error:", str(e))
+    if raise_on_error:
+      raise
+
+
+def _extract_json_object(raw_text: str) -> dict:
+  cleaned = raw_text.strip()
+  cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+  cleaned = re.sub(r"\s*```$", "", cleaned)
+  try:
+    parsed = json.loads(cleaned)
+  except json.JSONDecodeError:
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if not match:
+      raise
+    parsed = json.loads(match.group(0))
+
+  if not isinstance(parsed, dict):
+    raise ValueError("Model output is not a JSON object")
+  return parsed
+
+
+def _clean_str(val, default: str = "-") -> str:
+  if val is None:
+    return default
+  s = str(val).strip()
+  return s if s else default
+
+
+def _clean_bool(val, default: bool = False) -> bool:
+  if isinstance(val, bool):
+    return val
+  if isinstance(val, str):
+    low = val.strip().lower()
+    if low in ("true", "ya", "yes", "1"):
+      return True
+    if low in ("false", "tidak", "no", "0"):
+      return False
+  return default
+
+
+def normalize_classification(raw_dict: dict, message: str) -> dict:
+  jalur = _clean_str(raw_dict.get("jalur"), "Perlu_Klarifikasi")
+  if jalur not in ALLOWED_JALUR:
+    jalur = "Perlu_Klarifikasi"
+
+  prioritas = _clean_str(raw_dict.get("prioritas"), "Sedang")
+  if prioritas not in ALLOWED_PRIORITAS:
+    prioritas = "Sedang"
+
+  ringkasan = _clean_str(raw_dict.get("ringkasan"), "")
+  if not ringkasan or ringkasan == "-":
+    ringkasan = message[:180].strip() or "-"
+
+  return {
+      "jalur": jalur,
+      "nama": _clean_str(raw_dict.get("nama"), "-"),
+      "kontak": _clean_str(raw_dict.get("kontak"), "-"),
+      "instansi_atau_brand": _clean_str(
+          raw_dict.get("instansi_atau_brand"), "-"
+      ),
+      "minat_produk": _clean_str(raw_dict.get("minat_produk"), jalur),
+      "estimasi_qty": _clean_str(raw_dict.get("estimasi_qty"), "-"),
+      "detail_paket_trial": _clean_str(
+          raw_dict.get("detail_paket_trial"), "-"
+      ),
+      "prioritas": prioritas,
+      "ringkasan": ringkasan,
+      "gap_sop": _clean_str(raw_dict.get("gap_sop"), "-"),
+      "perlu_eskalasi_manusia": _clean_bool(
+          raw_dict.get("perlu_eskalasi_manusia"), default=False
+      ),
+  }
 
 
 def classify_lead(channel: str, message: str) -> dict:
@@ -64,16 +145,19 @@ def classify_lead(channel: str, message: str) -> dict:
           contents=prompt,
           config={"system_instruction": SYSTEM_INSTRUCTION},
       )
-      raw = response.text.strip()
-      if raw.startswith("```"):
-        raw = raw.strip("`").replace("json", "", 1).strip()
-      return json.loads(raw)
+      raw_text = response.text or ""
+      parsed = _extract_json_object(raw_text)
+      return normalize_classification(parsed, message)
     except APIError as e:
       last_error = e
       print(f"Model {model_name} failed with {e.code}: {e.message}")
       if e.code in (429, 500, 503, 404):
         continue
       raise
+    except (json.JSONDecodeError, ValueError) as e:
+      last_error = e
+      print(f"Model {model_name} returned invalid JSON: {str(e)}")
+      continue
 
   raise last_error
 
@@ -212,27 +296,41 @@ def save_to_sheets(channel: str, result: dict) -> str:
 
 
 if __name__ == "__main__":
-  sample_channel = os.getenv("LEAD_CHANNEL", "WhatsApp").strip()
-  sample_message = os.getenv(
-      "LEAD_MESSAGE",
-      (
-          "Assalamualaikum, saya admin travel umroh di Semarang, butuh info"
-          " maklon/co-branding paket skincare jamaah sekitar 300 pax untuk"
-          " keberangkatan awal tahun depan."
-      ),
-  ).strip()
-
-  result = classify_lead(sample_channel, sample_message)
-  print("AI Result:", json.dumps(result, ensure_ascii=False))
-  saved_tab = save_to_sheets(sample_channel, result)
-
-  notif = (
-      f"[Renjani AI - {sample_channel}]\n"
-      f"Tersimpan di Tab: {saved_tab}\n"
-      f"Jalur: {result['jalur']} | Prioritas: {result['prioritas']}\n"
-      f"Nama: {result['nama']} ({result['instansi_atau_brand']})\n"
-      f"Kontak: {result['kontak']} | Qty: {result['estimasi_qty']}\n"
-      f"Ringkasan: {result['ringkasan']}\n"
-      f"Eskalasi ke Anda: {'YA' if result['perlu_eskalasi_manusia'] else 'TIDAK'}"
+  sample_channel = os.getenv("LEAD_CHANNEL", "WhatsApp").strip() or "WhatsApp"
+  sample_message = (
+      os.getenv(
+          "LEAD_MESSAGE",
+          (
+              "Assalamualaikum, saya admin travel umroh di Semarang, butuh info"
+              " maklon/co-branding paket skincare jamaah sekitar 300 pax untuk"
+              " keberangkatan awal tahun depan."
+          ),
+      ).strip()
   )
-  send_telegram(notif)
+
+  if not sample_message:
+    raise ValueError("LEAD_MESSAGE is empty")
+
+  try:
+    result = classify_lead(sample_channel, sample_message)
+    print("AI Result:", json.dumps(result, ensure_ascii=False))
+    saved_tab = save_to_sheets(sample_channel, result)
+
+    notif = (
+        f"[Renjani AI - {sample_channel}]\n"
+        f"Tersimpan di Tab: {saved_tab}\n"
+        f"Jalur: {result['jalur']} | Prioritas: {result['prioritas']}\n"
+        f"Nama: {result['nama']} ({result['instansi_atau_brand']})\n"
+        f"Kontak: {result['kontak']} | Qty: {result['estimasi_qty']}\n"
+        f"Ringkasan: {result['ringkasan']}\n"
+        f"Eskalasi ke Anda: {'YA' if result['perlu_eskalasi_manusia'] else 'TIDAK'}"
+    )
+    send_telegram(notif, raise_on_error=True)
+  except Exception as e:
+    err_notif = (
+        f"[Renjani AI - ERROR]\n"
+        f"Channel: {sample_channel}\n"
+        f"Error: {str(e)[:500]}"
+    )
+    send_telegram(err_notif, raise_on_error=False)
+    raise
