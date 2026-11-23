@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 import re
+import time
 from google import genai
 from google.genai.errors import APIError
 import gspread
@@ -60,6 +61,15 @@ def send_telegram(text: str, raise_on_error: bool = True) -> None:
     print("Telegram send error:", str(e))
     if raise_on_error:
       raise
+
+
+def split_messages(raw_message: str) -> list[str]:
+  # Mendukung pemisah '---' pada baris tersendiri atau blok kosong ganda '\n\n'
+  if re.search(r"(?m)^\s*---\s*$", raw_message):
+    parts = re.split(r"(?m)^\s*---\s*$", raw_message)
+  else:
+    parts = re.split(r"\n\s*\n", raw_message)
+  return [p.strip() for p in parts if p and p.strip()]
 
 
 def _extract_json_object(raw_text: str) -> dict:
@@ -365,7 +375,7 @@ def save_to_sheets(channel: str, result: dict) -> str:
 
 if __name__ == "__main__":
   sample_channel = os.getenv("LEAD_CHANNEL", "WhatsApp").strip() or "WhatsApp"
-  sample_message = os.getenv(
+  raw_message = os.getenv(
       "LEAD_MESSAGE",
       (
           "Assalamualaikum, saya admin travel umroh di Semarang, butuh info"
@@ -374,24 +384,32 @@ if __name__ == "__main__":
       ),
   ).strip()
 
-  if not sample_message:
+  messages = split_messages(raw_message)
+  if not messages:
     raise ValueError("LEAD_MESSAGE is empty")
 
-  try:
-    result = classify_lead(sample_channel, sample_message)
-    print("AI Result:", json.dumps(result, ensure_ascii=False))
-    saved_tab = save_to_sheets(sample_channel, result)
+  print(f"Total messages to process: {len(messages)}")
 
-    notif = (
-        f"[Renjani AI - {sample_channel}]\n"
-        f"Tersimpan di Tab: {saved_tab}\n"
-        f"Jalur: {result['jalur']} | Prioritas: {result['prioritas']}\n"
-        f"Nama: {result['nama']} ({result['instansi_atau_brand']})\n"
-        f"Kontak: {result['kontak']} | Qty: {result['estimasi_qty']}\n"
-        f"Ringkasan: {result['ringkasan']}\n"
-        f"Eskalasi ke Anda: {'YA' if result['perlu_eskalasi_manusia'] else 'TIDAK'}"
-    )
-    send_telegram(notif, raise_on_error=True)
+  try:
+    for idx, msg in enumerate(messages, start=1):
+      print(f"--- Processing message #{idx}/{len(messages)} ---")
+      result = classify_lead(sample_channel, msg)
+      print("AI Result:", json.dumps(result, ensure_ascii=False))
+      saved_tab = save_to_sheets(sample_channel, result)
+
+      notif = (
+          f"[Renjani AI - {sample_channel}] ({idx}/{len(messages)})\n"
+          f"Tersimpan di Tab: {saved_tab}\n"
+          f"Jalur: {result['jalur']} | Prioritas: {result['prioritas']}\n"
+          f"Nama: {result['nama']} ({result['instansi_atau_brand']})\n"
+          f"Kontak: {result['kontak']} | Qty: {result['estimasi_qty']}\n"
+          f"Ringkasan: {result['ringkasan']}\n"
+          f"Eskalasi ke Anda: {'YA' if result['perlu_eskalasi_manusia'] else 'TIDAK'}"
+      )
+      send_telegram(notif, raise_on_error=True)
+
+      if idx < len(messages):
+        time.sleep(1)
   except Exception as e:
     err_notif = (
         f"[Renjani AI - ERROR]\n"
