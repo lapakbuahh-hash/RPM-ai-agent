@@ -18,7 +18,6 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_CANDIDATES = [
     "gemini-3.8-flash",
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
 ]
 
 ALLOWED_JALUR = {"Maklon_Travel", "Trial_Kiswah_Veil", "Perlu_Klarifikasi"}
