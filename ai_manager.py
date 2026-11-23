@@ -64,7 +64,6 @@ def send_telegram(text: str, raise_on_error: bool = True) -> None:
 
 
 def split_messages(raw_message: str) -> list[str]:
-  # Mendukung pemisah '---' pada baris tersendiri atau blok kosong ganda '\n\n'
   if re.search(r"(?m)^\s*---\s*$", raw_message):
     parts = re.split(r"(?m)^\s*---\s*$", raw_message)
   else:
@@ -259,7 +258,59 @@ def _find_next_empty_row_col_a(ws, start_row: int = 2) -> int:
   return max(start_row, len(col_a_values) + 1)
 
 
-def save_to_sheets(channel: str, result: dict) -> str:
+def _is_duplicate_today(
+    ws_target, today_only: str, channel: str, result: dict, target_tab: str
+) -> bool:
+  existing_rows = ws_target.get_all_values()
+  recent_rows = existing_rows[1:][-15:]
+  new_kontak = result.get("kontak", "-").strip().lower()
+  new_nama = result.get("nama", "-").strip().lower()
+  new_ringkasan = result.get("ringkasan", "-").strip().lower()[:80]
+
+  for r in recent_rows:
+    if not r or not r[0].strip().startswith(today_only):
+      continue
+    r_channel = r[1].strip().lower() if len(r) > 1 else ""
+    r_nama = r[2].strip().lower() if len(r) > 2 else "-"
+    r_kontak = r[3].strip().lower() if len(r) > 3 else "-"
+
+    if r_channel != channel.strip().lower():
+      continue
+
+    if new_kontak not in ("", "-") and r_kontak == new_kontak:
+      return True
+
+    if target_tab == "Order_Trial_Kiswah":
+      r_ringkasan = r[5].strip().lower()[:80] if len(r) > 5 else ""
+      if new_ringkasan and r_ringkasan == new_ringkasan:
+        return True
+    else:
+      r_instansi = r[4].strip().lower() if len(r) > 4 else "-"
+      new_instansi = result.get("instansi_atau_brand", "-").strip().lower()
+      if (
+          new_nama not in ("", "-")
+          and r_nama == new_nama
+          and r_instansi == new_instansi
+      ):
+        return True
+
+  return False
+
+
+def _merge_unique_text(existing: str, addition: str, max_len: int = 450) -> str:
+  parts = [p.strip() for p in existing.split(";") if p.strip() and p.strip() != "-"]
+  add_clean = addition.strip()
+  if add_clean and add_clean != "-" and add_clean not in parts:
+    parts.append(add_clean)
+  if not parts:
+    return "-"
+  merged = "; ".join(parts)
+  if len(merged) > max_len:
+    return merged[: max_len - 3].rstrip() + "..."
+  return merged
+
+
+def save_to_sheets(channel: str, result: dict) -> tuple[str, bool]:
   sh = get_spreadsheet()
   print("Spreadsheet title:", sh.title)
   print("Available worksheets:", [ws.title for ws in sh.worksheets()])
@@ -272,6 +323,10 @@ def save_to_sheets(channel: str, result: dict) -> str:
       "Order_Trial_Kiswah" if jalur == "Trial_Kiswah_Veil" else "Leads_Maklon"
   )
   ws_target = sh.worksheet(target_tab)
+
+  if _is_duplicate_today(ws_target, today_only, channel, result, target_tab):
+    print(f"Duplicate detected in {target_tab} for today ({today_only}), skipping insert.")
+    return target_tab, True
 
   if target_tab == "Leads_Maklon":
     row = [
@@ -338,14 +393,8 @@ def save_to_sheets(channel: str, result: dict) -> str:
       prev_highlight = row_vals[4] if len(row_vals) > 4 and row_vals[4] else ""
       prev_gap = row_vals[5] if len(row_vals) > 5 and row_vals[5] else "-"
 
-      new_highlight = (
-          f"{prev_highlight}; {highlight}" if prev_highlight else highlight
-      )
-      new_gap = (
-          gap_sop
-          if prev_gap in ("", "-")
-          else (f"{prev_gap}; {gap_sop}" if gap_sop != "-" else prev_gap)
-      )
+      new_highlight = _merge_unique_text(prev_highlight, highlight, max_len=450)
+      new_gap = _merge_unique_text(prev_gap, gap_sop, max_len=450)
 
       ws_log.update(
           f"A{idx + 1}:F{idx + 1}",
@@ -370,7 +419,7 @@ def save_to_sheets(channel: str, result: dict) -> str:
         value_input_option="USER_ENTERED",
     )
 
-  return target_tab
+  return target_tab, False
 
 
 if __name__ == "__main__":
@@ -395,17 +444,24 @@ if __name__ == "__main__":
       print(f"--- Processing message #{idx}/{len(messages)} ---")
       result = classify_lead(sample_channel, msg)
       print("AI Result:", json.dumps(result, ensure_ascii=False))
-      saved_tab = save_to_sheets(sample_channel, result)
+      saved_tab, is_duplicate = save_to_sheets(sample_channel, result)
 
-      notif = (
-          f"[Renjani AI - {sample_channel}] ({idx}/{len(messages)})\n"
-          f"Tersimpan di Tab: {saved_tab}\n"
-          f"Jalur: {result['jalur']} | Prioritas: {result['prioritas']}\n"
-          f"Nama: {result['nama']} ({result['instansi_atau_brand']})\n"
-          f"Kontak: {result['kontak']} | Qty: {result['estimasi_qty']}\n"
-          f"Ringkasan: {result['ringkasan']}\n"
-          f"Eskalasi ke Anda: {'YA' if result['perlu_eskalasi_manusia'] else 'TIDAK'}"
-      )
+      if is_duplicate:
+        notif = (
+            f"[Renjani AI - {sample_channel}] ({idx}/{len(messages)})\n"
+            f"Status: DUPLIKAT DILEWATI (sudah tercatat hari ini di {saved_tab})\n"
+            f"Nama: {result['nama']} | Kontak: {result['kontak']}"
+        )
+      else:
+        notif = (
+            f"[Renjani AI - {sample_channel}] ({idx}/{len(messages)})\n"
+            f"Tersimpan di Tab: {saved_tab}\n"
+            f"Jalur: {result['jalur']} | Prioritas: {result['prioritas']}\n"
+            f"Nama: {result['nama']} ({result['instansi_atau_brand']})\n"
+            f"Kontak: {result['kontak']} | Qty: {result['estimasi_qty']}\n"
+            f"Ringkasan: {result['ringkasan']}\n"
+            f"Eskalasi ke Anda: {'YA' if result['perlu_eskalasi_manusia'] else 'TIDAK'}"
+        )
       send_telegram(notif, raise_on_error=True)
 
       if idx < len(messages):
