@@ -107,6 +107,13 @@ def _clean_bool(val, default: bool = False) -> bool:
   return default
 
 
+def _normalize_phone(contact: str) -> str:
+  digits = re.sub(r"\D", "", contact or "")
+  if digits.startswith("62") and len(digits) > 9:
+    return "0" + digits[2:]
+  return digits
+
+
 def normalize_classification(raw_dict: dict, message: str) -> dict:
   jalur = _clean_str(raw_dict.get("jalur"), "Perlu_Klarifikasi")
   if jalur not in ALLOWED_JALUR:
@@ -203,7 +210,7 @@ def _rule_based_fallback(message: str, reason: str) -> dict:
   }
 
 
-def classify_lead(channel: str, message: str) -> dict:
+def classify_lead(channel: str, message: str) -> tuple[dict, bool]:
   prompt = f"Channel: {channel}\nPesan: {message}"
   errors = []
 
@@ -220,7 +227,7 @@ def classify_lead(channel: str, message: str) -> dict:
         raw_text = response.text or ""
         parsed = _extract_json_object(raw_text)
         print(f"Succeeded with key #{key_idx} and model: {model_name}")
-        return normalize_classification(parsed, message)
+        return normalize_classification(parsed, message), False
       except APIError as e:
         msg = f"key#{key_idx}/{model_name} [{e.code}]: {e.message}"
         print("Model error:", msg)
@@ -236,7 +243,7 @@ def classify_lead(channel: str, message: str) -> dict:
 
   summary_err = " | ".join(errors) if errors else "Unknown AI error"
   print("Using rule-based fallback due to:", summary_err)
-  return _rule_based_fallback(message, summary_err)
+  return _rule_based_fallback(message, summary_err), True
 
 
 def get_spreadsheet():
@@ -262,22 +269,23 @@ def _is_duplicate_today(
     ws_target, today_only: str, channel: str, result: dict, target_tab: str
 ) -> bool:
   existing_rows = ws_target.get_all_values()
-  recent_rows = existing_rows[1:][-15:]
-  new_kontak = result.get("kontak", "-").strip().lower()
+  recent_rows = existing_rows[1:][-50:]
+  new_phone_norm = _normalize_phone(result.get("kontak", "-"))
   new_nama = result.get("nama", "-").strip().lower()
   new_ringkasan = result.get("ringkasan", "-").strip().lower()[:80]
+  channel_low = channel.strip().lower()
 
   for r in recent_rows:
     if not r or not r[0].strip().startswith(today_only):
       continue
     r_channel = r[1].strip().lower() if len(r) > 1 else ""
-    r_nama = r[2].strip().lower() if len(r) > 2 else "-"
-    r_kontak = r[3].strip().lower() if len(r) > 3 else "-"
-
-    if r_channel != channel.strip().lower():
+    if r_channel != channel_low:
       continue
 
-    if new_kontak not in ("", "-") and r_kontak == new_kontak:
+    r_nama = r[2].strip().lower() if len(r) > 2 else "-"
+    r_phone_norm = _normalize_phone(r[3] if len(r) > 3 else "-")
+
+    if len(new_phone_norm) >= 8 and r_phone_norm == new_phone_norm:
       return True
 
     if target_tab == "Order_Trial_Kiswah":
@@ -298,7 +306,11 @@ def _is_duplicate_today(
 
 
 def _merge_unique_text(existing: str, addition: str, max_len: int = 450) -> str:
-  parts = [p.strip() for p in existing.split(";") if p.strip() and p.strip() != "-"]
+  parts = [
+      p.strip()
+      for p in existing.split(";")
+      if p.strip() and p.strip() != "-"
+  ]
   add_clean = addition.strip()
   if add_clean and add_clean != "-" and add_clean not in parts:
     parts.append(add_clean)
@@ -325,7 +337,10 @@ def save_to_sheets(channel: str, result: dict) -> tuple[str, bool]:
   ws_target = sh.worksheet(target_tab)
 
   if _is_duplicate_today(ws_target, today_only, channel, result, target_tab):
-    print(f"Duplicate detected in {target_tab} for today ({today_only}), skipping insert.")
+    print(
+        f"Duplicate detected in {target_tab} for today ({today_only}), skipping"
+        " insert."
+    )
     return target_tab, True
 
   if target_tab == "Leads_Maklon":
@@ -422,50 +437,86 @@ def save_to_sheets(channel: str, result: dict) -> tuple[str, bool]:
   return target_tab, False
 
 
+def _format_single_notif(
+    channel: str,
+    idx: int,
+    total: int,
+    saved_tab: str,
+    is_duplicate: bool,
+    result: dict,
+) -> str:
+  if is_duplicate:
+    return (
+        f"[Renjani AI - {channel}] ({idx}/{total})\n"
+        f"Status: DUPLIKAT DILEWATI (sudah tercatat hari ini di {saved_tab})\n"
+        f"Nama: {result['nama']} | Kontak: {result['kontak']}"
+    )
+  return (
+      f"[Renjani AI - {channel}] ({idx}/{total})\n"
+      f"Tersimpan di Tab: {saved_tab}\n"
+      f"Jalur: {result['jalur']} | Prioritas: {result['prioritas']}\n"
+      f"Nama: {result['nama']} ({result['instansi_atau_brand']})\n"
+      f"Kontak: {result['kontak']} | Qty: {result['estimasi_qty']}\n"
+      f"Ringkasan: {result['ringkasan']}\n"
+      f"Eskalasi ke Anda: {'YA' if result['perlu_eskalasi_manusia'] else 'TIDAK'}"
+  )
+
+
 if __name__ == "__main__":
   sample_channel = os.getenv("LEAD_CHANNEL", "WhatsApp").strip() or "WhatsApp"
-  raw_message = os.getenv(
-      "LEAD_MESSAGE",
-      (
-          "Assalamualaikum, saya admin travel umroh di Semarang, butuh info"
-          " maklon/co-branding paket skincare jamaah sekitar 300 pax untuk"
-          " keberangkatan awal tahun depan."
-      ),
-  ).strip()
+  raw_message = os.getenv("LEAD_MESSAGE", "").strip()
+
+  if not raw_message:
+    raise ValueError(
+        "LEAD_MESSAGE kosong. Isi input pesan saat workflow_dispatch atau"
+        " kirim client_payload.message pada repository_dispatch."
+    )
 
   messages = split_messages(raw_message)
   if not messages:
-    raise ValueError("LEAD_MESSAGE is empty")
+    raise ValueError("Tidak ada pesan valid yang bisa diproses dari LEAD_MESSAGE.")
 
   print(f"Total messages to process: {len(messages)}")
+  is_large_batch = len(messages) > 3
+  batch_lines = []
+  used_any_fallback = False
 
   try:
     for idx, msg in enumerate(messages, start=1):
       print(f"--- Processing message #{idx}/{len(messages)} ---")
-      result = classify_lead(sample_channel, msg)
+      result, used_fallback = classify_lead(sample_channel, msg)
+      if used_fallback:
+        used_any_fallback = True
       print("AI Result:", json.dumps(result, ensure_ascii=False))
       saved_tab, is_duplicate = save_to_sheets(sample_channel, result)
 
-      if is_duplicate:
-        notif = (
-            f"[Renjani AI - {sample_channel}] ({idx}/{len(messages)})\n"
-            f"Status: DUPLIKAT DILEWATI (sudah tercatat hari ini di {saved_tab})\n"
-            f"Nama: {result['nama']} | Kontak: {result['kontak']}"
+      if not is_large_batch:
+        notif = _format_single_notif(
+            sample_channel, idx, len(messages), saved_tab, is_duplicate, result
         )
+        send_telegram(notif, raise_on_error=True)
       else:
-        notif = (
-            f"[Renjani AI - {sample_channel}] ({idx}/{len(messages)})\n"
-            f"Tersimpan di Tab: {saved_tab}\n"
-            f"Jalur: {result['jalur']} | Prioritas: {result['prioritas']}\n"
-            f"Nama: {result['nama']} ({result['instansi_atau_brand']})\n"
-            f"Kontak: {result['kontak']} | Qty: {result['estimasi_qty']}\n"
-            f"Ringkasan: {result['ringkasan']}\n"
-            f"Eskalasi ke Anda: {'YA' if result['perlu_eskalasi_manusia'] else 'TIDAK'}"
+        status_label = "DUPLIKAT" if is_duplicate else saved_tab
+        eskalasi_flag = " [ESKALASI]" if result["perlu_eskalasi_manusia"] else ""
+        batch_lines.append(
+            f"{idx}. {result['nama']} | {result['jalur']} | {status_label}{eskalasi_flag}"
         )
-      send_telegram(notif, raise_on_error=True)
 
       if idx < len(messages):
-        time.sleep(1)
+        time.sleep(2.5 if used_fallback else 1.0)
+
+    if is_large_batch:
+      summary_notif = (
+          f"[Renjani AI Batch - {sample_channel}] ({len(messages)} pesan)\n"
+          + "\n".join(batch_lines[:25])
+      )
+      if len(batch_lines) > 25:
+        summary_notif += f"\n...dan {len(batch_lines) - 25} item lainnya."
+      send_telegram(summary_notif, raise_on_error=True)
+
+    if used_any_fallback:
+      print("Completed with rule-based fallback on one or more messages.")
+
   except Exception as e:
     err_notif = (
         f"[Renjani AI - ERROR]\n"
