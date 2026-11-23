@@ -8,15 +8,16 @@ import gspread
 import requests
 
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"].strip()
+GEMINI_API_KEY_2 = os.environ.get("GEMINI_API_KEY_2", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"].strip()
 GSHEET_ID = os.environ["GSHEET_ID"].strip()
 GCP_SERVICE_ACCOUNT_JSON = os.environ["GCP_SERVICE_ACCOUNT_JSON"].strip()
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+API_KEYS = [k for k in [GEMINI_API_KEY, GEMINI_API_KEY_2] if k]
 
 MODEL_CANDIDATES = [
-    "gemini-3.8-flash",
+    "gemini-3.5-flash",
 ]
 
 ALLOWED_JALUR = {"Maklon_Travel", "Trial_Kiswah_Veil", "Perlu_Klarifikasi"}
@@ -131,33 +132,102 @@ def normalize_classification(raw_dict: dict, message: str) -> dict:
   }
 
 
+def _rule_based_fallback(message: str, reason: str) -> dict:
+  low = message.lower()
+  maklon_keywords = [
+      "maklon",
+      "co-branding",
+      "cobranding",
+      "travel",
+      "umroh",
+      "umrah",
+      "haji",
+      "jamaah",
+      "pax",
+      "moq",
+      "pabrik",
+      "produksi",
+  ]
+  trial_keywords = [
+      "kiswah",
+      "trial",
+      "sunscreen",
+      "lip balm",
+      "moisturizer",
+      "facial wash",
+      "sample",
+      "ecer",
+      "ritel",
+      "retail",
+  ]
+
+  if any(k in low for k in maklon_keywords):
+    jalur = "Maklon_Travel"
+    prioritas = "Tinggi"
+  elif any(k in low for k in trial_keywords):
+    jalur = "Trial_Kiswah_Veil"
+    prioritas = "Sedang"
+  else:
+    jalur = "Perlu_Klarifikasi"
+    prioritas = "Sedang"
+
+  phone_match = re.search(r"(\+?62|0)8\d{7,12}", message)
+  kontak = phone_match.group(0) if phone_match else "-"
+
+  qty_match = re.search(r"\b(\d+\s*(?:pcs|pax|box|paket|unit|botol))\b", low)
+  estimasi_qty = qty_match.group(1) if qty_match else "-"
+
+  return {
+      "jalur": jalur,
+      "nama": "-",
+      "kontak": kontak,
+      "instansi_atau_brand": "-",
+      "minat_produk": jalur,
+      "estimasi_qty": estimasi_qty,
+      "detail_paket_trial": (
+          "Kiswah Veil Trial Kit" if jalur == "Trial_Kiswah_Veil" else "-"
+      ),
+      "prioritas": prioritas,
+      "ringkasan": message[:200].strip() or "-",
+      "gap_sop": f"[Fallback-Rule] {reason[:120]}",
+      "perlu_eskalasi_manusia": True,
+  }
+
+
 def classify_lead(channel: str, message: str) -> dict:
   prompt = f"Channel: {channel}\nPesan: {message}"
-  last_error = None
+  errors = []
 
-  for model_name in MODEL_CANDIDATES:
-    try:
-      print("Trying model:", model_name)
-      response = client.models.generate_content(
-          model=model_name,
-          contents=prompt,
-          config={"system_instruction": SYSTEM_INSTRUCTION},
-      )
-      raw_text = response.text or ""
-      parsed = _extract_json_object(raw_text)
-      return normalize_classification(parsed, message)
-    except APIError as e:
-      last_error = e
-      print(f"Model {model_name} failed with {e.code}: {e.message}")
-      if e.code in (429, 500, 503, 404):
+  for key_idx, api_key in enumerate(API_KEYS, start=1):
+    client = genai.Client(api_key=api_key)
+    for model_name in MODEL_CANDIDATES:
+      try:
+        print(f"Trying key #{key_idx} with model: {model_name}")
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config={"system_instruction": SYSTEM_INSTRUCTION},
+        )
+        raw_text = response.text or ""
+        parsed = _extract_json_object(raw_text)
+        print(f"Succeeded with key #{key_idx} and model: {model_name}")
+        return normalize_classification(parsed, message)
+      except APIError as e:
+        msg = f"key#{key_idx}/{model_name} [{e.code}]: {e.message}"
+        print("Model error:", msg)
+        errors.append(msg)
+        if e.code in (429, 500, 503):
+          continue
+        raise
+      except (json.JSONDecodeError, ValueError) as e:
+        msg = f"key#{key_idx}/{model_name} [JSON]: {str(e)}"
+        print("Model JSON error:", msg)
+        errors.append(msg)
         continue
-      raise
-    except (json.JSONDecodeError, ValueError) as e:
-      last_error = e
-      print(f"Model {model_name} returned invalid JSON: {str(e)}")
-      continue
 
-  raise last_error
+  summary_err = " | ".join(errors) if errors else "Unknown AI error"
+  print("Using rule-based fallback due to:", summary_err)
+  return _rule_based_fallback(message, summary_err)
 
 
 def get_spreadsheet():
@@ -295,16 +365,14 @@ def save_to_sheets(channel: str, result: dict) -> str:
 
 if __name__ == "__main__":
   sample_channel = os.getenv("LEAD_CHANNEL", "WhatsApp").strip() or "WhatsApp"
-  sample_message = (
-      os.getenv(
-          "LEAD_MESSAGE",
-          (
-              "Assalamualaikum, saya admin travel umroh di Semarang, butuh info"
-              " maklon/co-branding paket skincare jamaah sekitar 300 pax untuk"
-              " keberangkatan awal tahun depan."
-          ),
-      ).strip()
-  )
+  sample_message = os.getenv(
+      "LEAD_MESSAGE",
+      (
+          "Assalamualaikum, saya admin travel umroh di Semarang, butuh info"
+          " maklon/co-branding paket skincare jamaah sekitar 300 pax untuk"
+          " keberangkatan awal tahun depan."
+      ),
+  ).strip()
 
   if not sample_message:
     raise ValueError("LEAD_MESSAGE is empty")
